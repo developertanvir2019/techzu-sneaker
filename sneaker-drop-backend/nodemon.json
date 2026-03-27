@@ -1,0 +1,13 @@
+{
+  "watch": ["src"],
+  "ext": "ts",
+  "ignore": [
+    "src/**/*.test.ts",
+    "node_modules",
+    "dist",
+    "generated",
+    "prisma/migrations"
+  ],
+  "exec": "ts-node src/server.ts",
+  "delay": 500
+}
