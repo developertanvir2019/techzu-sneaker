@@ -1,9 +1,9 @@
 import { useSelector } from "react-redux";
-import { RootState } from "../app/store";
+import type { RootState } from "../app/store";
 import { useGetDropsQuery } from "../services/api";
 import { setStockMap } from "../features/drops/dropsSlice";
 import { useDispatch } from "react-redux";
-import { AppDispatch } from "../app/store";
+import type { AppDispatch } from "../app/store";
 import { useEffect } from "react";
 import { DropCard } from "../components/DropCard";
 import { UserSelector } from "../components/UserSelector";
