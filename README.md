@@ -6,6 +6,8 @@ A high-concurrency sneaker drop platform with real-time stock tracking, 60-secon
 
 ---
 
+## Live Url=> https://techzu-sneaker.vercel.app/
+
 ## 🚀 Local Setup
 
 ### Prerequisites
