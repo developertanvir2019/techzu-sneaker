@@ -98,6 +98,8 @@ export const ReservePurchaseButton = ({
     if (!currentUser) return;
     try {
       await createReservation({ userId: currentUser.id, dropId }).unwrap();
+      // Immediately refetch reservation state so UI shows purchase button
+      await refetchReservation();
       toast.success("✅ Item Reserved!", {
         description:
           "You have 60 seconds to complete your purchase before it expires.",
