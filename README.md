@@ -1,198 +1,133 @@
-# 👟 SneakerDrop — Real-Time Limited Edition Inventory System
+# 👟 TechZu Sneaker Drop — Real-Time Inventory System
 
-A production-ready full-stack application for a limited edition sneaker drop with real-time inventory tracking, atomic reservation handling, and concurrency-safe purchasing.
+A high-concurrency sneaker drop platform with real-time stock tracking, 60-second reservation expiry, and live WebSocket updates.
 
-## ⚡ Live Demo
-> Add your Vercel URLs here after deployment.
-
-**Frontend:** `https://sneaker-drop-frontend.vercel.app`  
-**Backend:** `https://sneaker-drop-backend.vercel.app`
+**Tech Stack:** Node.js · Express · Prisma · PostgreSQL (Neon) · Redis (Upstash) · BullMQ · Socket.IO · React · Vite · Tailwind CSS
 
 ---
 
-## 🚀 How to Run Locally
+## 🚀 Local Setup
 
 ### Prerequisites
-- Node.js 18+
-- A **Neon** PostgreSQL database ([neon.tech](https://neon.tech))
-- An **Upstash** Redis instance ([upstash.com](https://upstash.com))
 
-### 1. Clone & Setup
+- Node.js ≥ 18
+- PostgreSQL database (or [Neon](https://neon.tech) serverless)
+- Redis instance (or [Upstash](https://upstash.com) serverless)
 
-```bash
-git clone <your-repo>
-cd techzu_store
-```
-
-### 2. Configure Backend
+### 1. Clone & Install
 
 ```bash
+git clone https://github.com/developertanvir2019/techzu-sneaker.git
+cd techzu-sneaker
+
+# Backend
 cd sneaker-drop-backend
-cp .env.example .env
+npm install
+
+# Frontend
+cd ../sneaker-drop-frontend
+npm install
 ```
 
-Edit `.env` with your credentials:
+### 2. Configure Environment
+
+**Backend** — create `sneaker-drop-backend/.env`:
+
 ```env
-DATABASE_URL="postgresql://user:pass@ep-xxxx.us-east-1.aws.neon.tech/neondb?sslmode=require"
-DIRECT_URL="postgresql://user:pass@ep-xxxx.us-east-1.aws.neon.tech/neondb?sslmode=require"
+DATABASE_URL="postgresql://user:password@host/dbname?sslmode=require"
 REDIS_URL="rediss://default:password@your-endpoint.upstash.io:6379"
 PORT=3001
 FRONTEND_URL=http://localhost:5173
+NODE_ENV=development
 ```
 
-### 3. Run DB Migration & Seed
+**Frontend** — create `sneaker-drop-frontend/.env`:
+
+```env
+VITE_API_URL=http://localhost:3001
+VITE_SOCKET_URL=http://localhost:3001
+```
+
+### 3. Database Setup
 
 ```bash
-npm install
-npm run db:migrate     # Creates all tables + indexes
-npm run db:seed        # Seeds 5 demo users + 3 sneaker drops
+cd sneaker-drop-backend
+npx prisma generate
+npx prisma db push        # sync schema to DB
+npm run db:seed            # (optional) seed sample data
 ```
 
-### 4. Start Backend
+### 4. Run
 
 ```bash
-npm run dev    # Starts Express + Socket.io + BullMQ worker on :3001
+# Terminal 1 — Backend (http://localhost:3001)
+cd sneaker-drop-backend
+npm run dev
+
+# Terminal 2 — Frontend (http://localhost:5173)
+cd sneaker-drop-frontend
+npm run dev
 ```
 
-### 5. Configure & Start Frontend
+---
+
+### Example: Create a Drop
 
 ```bash
-cd ../sneaker-drop-frontend
-cp .env.example .env   # VITE_API_URL=http://localhost:3001
-npm install
-npm run dev            # Starts Vite dev server on :5173
+curl -X POST http://localhost:3001/api/drops \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Air Jordan 1","price":18000,"totalStock":100,"startTime":"2026-03-29T00:00:00Z"}'
 ```
-
-### 6. Open in Two Browser Windows
-
-Open `http://localhost:5173` in **two** windows side-by-side to demo real-time sync.
 
 ---
 
 ## 🏗️ Architecture Decisions
 
-### How I Handled 60-Second Expiration
+### 60-Second Reservation Expiry
 
-**Primary: BullMQ Delayed Jobs (Redis)**
-- When a reservation is created, a delayed job is enqueued with `delay: 60000ms` using a deterministic `jobId` (`expire-<reservationId>`) to prevent duplicates.
-- The BullMQ worker processes the job at T+60s: checks if reservation is still `ACTIVE` inside a Prisma transaction, marks it `EXPIRED`, restores `availableStock`, and emits a `reservation:expired` WebSocket event.
+The expiry is handled by **BullMQ delayed jobs** backed by Redis — not `setTimeout` or cron polling.
 
-**Fallback: `expiresAt` in DB**
-- Every reservation stores `expiresAt` in PostgreSQL so the system can recover from Redis outages via a periodic cleanup cron if needed.
+**Flow:**
 
-**Why not a cron job alone?** Cron granularity is typically 1 minute. BullMQ provides millisecond precision and guaranteed delivery with retry logic.
+1. User clicks "Reserve" → backend decrements `availableStock` inside a **Prisma transaction** and creates a `Reservation` record with `expiresAt` timestamp
+2. A BullMQ job is enqueued with a **60,000 ms delay** (`scheduleReservationExpiry`)
+3. After exactly 60 seconds, the `reservationWorker` picks up the job:
+   - Checks if reservation is still `ACTIVE` (skips if already `COMPLETED`)
+   - Marks it `EXPIRED` and **restores stock** atomically in a transaction
+   - Emits a `stock:update` + `reservation:expired` WebSocket event so the UI updates instantly
 
----
-
-### How I Prevented Overselling (Concurrency)
-
-The reservation system uses **two layers** of protection:
-
-**Layer 1: PostgreSQL Serializable Transactions**
-```typescript
-await prisma.$transaction(async (tx) => {
-  const drop = await tx.drop.findUnique({ where: { id: dropId } });
-  if (drop.availableStock <= 0) throw new Error("Out of stock");
-  
-  await tx.drop.update({
-    where: { id: dropId, availableStock: { gt: 0 } }, // ← Layer 2
-    data: { availableStock: { decrement: 1 } },
-  });
-}, { isolationLevel: "Serializable" });
-```
-
-**Layer 2: Conditional WHERE clause**
-- `availableStock: { gt: 0 }` in the `UPDATE` WHERE clause acts as a second atomic check — if two transactions race and both pass the `findUnique` check, only one will successfully execute the `UPDATE`. The other will get 0 affected rows and throw.
-
-**Result:** Even if 1000 users click "Reserve" simultaneously for the last 1 item, the database guarantees exactly 1 succeeds.
+**Why BullMQ?** — Delayed jobs survive server restarts, scale horizontally, and have built-in retry with exponential backoff (3 attempts). Unlike `setTimeout`, jobs persist in Redis and won't be lost on crash.
 
 ---
 
-## 🧱 Tech Stack & Folder Structure
+### Concurrency: Preventing Overselling
 
-### Backend (`sneaker-drop-backend/`)
-```
-src/
-├── app.ts                  # Express + CORS + routes
-├── server.ts               # HTTP + Socket.io + BullMQ startup
-├── config/
-│   ├── prisma.ts           # PrismaClient singleton
-│   └── redis.ts            # IORedis (Upstash TLS-aware)
-├── socket/index.ts         # Socket.io init + typed emitters
-├── queue/reservationQueue.ts # BullMQ Queue
-├── workers/reservationWorker.ts # Expiry worker
-├── middlewares/errorHandler.ts
-└── modules/
-    ├── drop/               # controller + service + routes
-    ├── reservation/        # Atomic reservation logic
-    ├── purchase/           # Purchase flow
-    └── user/               # Mock users
-```
+Multiple users hitting "Reserve" on the last item simultaneously is handled at **two layers**:
 
-### Frontend (`sneaker-drop-frontend/`)
+#### Layer 1 — Serializable Transaction
+
+
+#### Layer 2 — Atomic WHERE Guard
+
+
+## 🔄 Real-Time Flow
+
 ```
-src/
-├── app/store.ts            # Redux store
-├── services/api.ts         # RTK Query (all endpoints)
-├── socket/useSocket.ts     # WS hook → dispatch to Redux
-├── features/
-│   ├── drops/dropsSlice.ts # Live stock overrides
-│   └── auth/authSlice.ts   # Selected user
-├── components/             # DropCard, Buttons, Timer, Feed
-└── pages/DashboardPage.tsx
+User clicks Reserve
+       │
+       ▼
+[POST /api/reservations]
+       │
+       ├─ Prisma transaction (decrement stock + create reservation)
+       ├─ BullMQ: schedule expiry job (60s delay)
+       └─ Socket.IO: emit stock:update → all clients refresh
+       
+       ... 60 seconds pass ...
+       
+[BullMQ Worker fires]
+       │
+       ├─ Transaction: mark EXPIRED + restore stock
+       └─ Socket.IO: emit reservation:expired + stock:update
 ```
 
 ---
-
-## 📡 WebSocket Events
-
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `stock:update` | `{ id, availableStock, ... }` | Any stock change (reserve/expire/purchase) |
-| `reservation:expired` | `{ reservationId, dropId, userId, availableStock }` | 60s timer fired |
-| `purchase:confirmed` | `{ dropId, userId, username, availableStock }` | Successful purchase |
-
----
-
-## 🔌 API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/drops` | All drops + top 3 purchasers |
-| `POST` | `/api/drops` | Create a new drop |
-| `GET` | `/api/drops/:id` | Single drop |
-| `POST` | `/api/reservations` | Reserve an item (atomic) |
-| `GET` | `/api/reservations/check?userId=&dropId=` | Check active reservation |
-| `POST` | `/api/purchases` | Complete purchase |
-| `GET` | `/api/users` | List all users |
-| `POST` | `/api/users` | Create user |
-
----
-
-## ☁️ Deployment (Vercel + Neon + Upstash)
-
-### Backend on Vercel
-1. Create `vercel.json` in `sneaker-drop-backend/`:
-```json
-{
-  "version": 2,
-  "builds": [{ "src": "src/server.ts", "use": "@vercel/node" }],
-  "routes": [{ "src": "/(.*)", "dest": "src/server.ts" }]
-}
-```
-2. Add env vars in Vercel dashboard (DATABASE_URL, DIRECT_URL, REDIS_URL, FRONTEND_URL)
-3. `vercel --prod`
-
-### Frontend on Vercel
-1. Add `VITE_API_URL=https://your-backend.vercel.app` in Vercel env vars
-2. `vercel --prod`
-
-> **⚠️ Note on Vercel + Socket.io:** Vercel Serverless Functions don't support persistent WebSocket connections. For production, deploy the backend on **Railway**, **Render**, or **Fly.io** instead of Vercel Functions.
-
----
-
-## 🔐 Security Notes
-- Never commit `.env` files — use `.env.example` as a template
-- All credentials go in Vercel's Environment Variables dashboard
-- Neon uses SSL by default (`sslmode=require`)
-- Upstash Redis uses TLS (`rediss://` protocol) — handled automatically
