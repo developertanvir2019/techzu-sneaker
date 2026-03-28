@@ -98,12 +98,17 @@ export const ReservePurchaseButton = ({
     if (!currentUser) return;
     try {
       await createReservation({ userId: currentUser.id, dropId }).unwrap();
-      // Immediately refetch reservation state so UI shows purchase button
-      await refetchReservation();
       toast.success("✅ Item Reserved!", {
         description:
           "You have 60 seconds to complete your purchase before it expires.",
       });
+      // Force refetch reservation state so UI shows purchase button immediately
+      dispatch(
+        api.util.invalidateTags([
+          { type: "Reservation" as const, id: `${currentUser.id}-${dropId}` },
+        ])
+      );
+      refetchReservation();
     } catch (err: unknown) {
       toast.error(
         "⚠️ " + extractError(err, "Could not reserve item. Try again."),
