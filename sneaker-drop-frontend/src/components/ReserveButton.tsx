@@ -1,13 +1,14 @@
 import { useState, useEffect } from "react";
-import { useSelector } from "react-redux";
+import { useSelector, useDispatch } from "react-redux";
 import { toast } from "sonner";
 import { Loader2, Lock, ShoppingCart, BookmarkPlus } from "lucide-react";
 import { cn } from "../lib/utils";
-import type { RootState } from "../app/store";
+import type { RootState, AppDispatch } from "../app/store";
 import {
   useCheckReservationQuery,
   useCreateReservationMutation,
   useCompletePurchaseMutation,
+  api,
 } from "../services/api";
 import { CountdownTimer } from "./CountdownTimer";
 
@@ -35,6 +36,7 @@ export const ReservePurchaseButton = ({
   dropId,
   availableStock,
 }: ReservePurchaseButtonProps) => {
+  const dispatch = useDispatch<AppDispatch>();
   const currentUser = useSelector((s: RootState) => s.auth.currentUser);
   // Track if the countdown expired locally (before socket fires)
   const [localExpired, setLocalExpired] = useState(false);
@@ -131,7 +133,17 @@ export const ReservePurchaseButton = ({
           expiresAt={activeReservation.expiresAt}
           onExpire={() => {
             setLocalExpired(true);
-            // Re-check server state after local expiry
+            // Fallback: if socket event was missed, force API refetch to restore stock in UI.
+            // The socket reservation:expired handler does this too, but we guard here as well.
+            dispatch(api.util.invalidateTags(["Drops"]));
+            dispatch(
+              api.util.invalidateTags([
+                {
+                  type: "Reservation" as const,
+                  id: `${currentUser?.id}-${dropId}`,
+                },
+              ])
+            );
             void refetchReservation();
           }}
         />

@@ -36,8 +36,9 @@ export const useSocket = (currentUserId?: string) => {
     );
 
     // ─── reservation:expired ───────────────────────────────────────────────────
-    // Stock is restored by the BullMQ worker → socket broadcasts
-    // stock:update already fired; here we handle personal notification + cache
+    // BullMQ worker fires after 60s → marks EXPIRED, restores stock in DB,
+    // then emits TWO events: stock:update (handled above) + reservation:expired (here).
+    // We ALSO call updateStock here as a safety net in case stock:update was dropped.
     socket.on(
       "reservation:expired",
       (data: {
@@ -46,17 +47,22 @@ export const useSocket = (currentUserId?: string) => {
         userId: string;
         availableStock: number;
       }) => {
-        // All clients: refresh the Drops RTK cache to sync full drop object
+        // ✅ CRITICAL: directly restore stock in Redux for ALL clients
+        // (redundant with stock:update but ensures rollback even if that event is missed)
+        dispatch(
+          updateStock({ id: data.dropId, availableStock: data.availableStock })
+        );
+
+        // All clients: also invalidate RTK Drops cache so activity feed + full data sync
         dispatch(api.util.invalidateTags(["Drops"]));
 
-        // Personal notification for the user whose reservation expired
+        // Personal notification + reservation button reset for affected user only
         if (currentUserId && data.userId === currentUserId) {
           toast.warning("⏰ Your reservation expired!", {
             description:
               "You didn't complete the purchase in time. The item is back in the pool.",
             duration: 6000,
           });
-          // Reset this user's reservation button
           dispatch(
             api.util.invalidateTags([
               { type: "Reservation", id: `${data.userId}-${data.dropId}` },
