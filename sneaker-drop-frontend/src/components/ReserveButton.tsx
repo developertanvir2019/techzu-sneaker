@@ -8,7 +8,6 @@ import {
   useCheckReservationQuery,
   useCreateReservationMutation,
   useCompletePurchaseMutation,
-  type Reservation,
 } from "../services/api";
 import { CountdownTimer } from "./CountdownTimer";
 
@@ -17,21 +16,41 @@ interface ReservePurchaseButtonProps {
   availableStock: number;
 }
 
+// Helper to extract error message from RTK Query error
+const extractError = (err: unknown, fallback: string): string => {
+  if (
+    err &&
+    typeof err === "object" &&
+    "data" in err &&
+    err.data &&
+    typeof err.data === "object" &&
+    "error" in err.data
+  ) {
+    return String((err.data as { error: string }).error);
+  }
+  return fallback;
+};
+
 export const ReservePurchaseButton = ({
   dropId,
   availableStock,
 }: ReservePurchaseButtonProps) => {
   const currentUser = useSelector((s: RootState) => s.auth.currentUser);
+  // Track if the countdown expired locally (before socket fires)
   const [localExpired, setLocalExpired] = useState(false);
 
-  // Check for existing active reservation
+  // Always re-check on mount so state is fresh after page reload or user switch
   const {
     data: activeReservation,
     isLoading: checking,
     refetch: refetchReservation,
   } = useCheckReservationQuery(
     { userId: currentUser?.id ?? "", dropId },
-    { skip: !currentUser }
+    {
+      skip: !currentUser,
+      // Re-check whenever the component mounts (user could have an existing reservation)
+      refetchOnMountOrArgChange: true,
+    }
   );
 
   const [createReservation, { isLoading: reserving }] =
@@ -39,19 +58,19 @@ export const ReservePurchaseButton = ({
   const [completePurchase, { isLoading: purchasing }] =
     useCompletePurchaseMutation();
 
-  // Reset local expired state when reservation changes
+  // When a new active reservation arrives from the server, clear local expired flag
   useEffect(() => {
     if (activeReservation?.status === "ACTIVE") {
       setLocalExpired(false);
     }
   }, [activeReservation]);
 
-  // No user selected
+  // ── No user selected ──────────────────────────────────────────────────────
   if (!currentUser) {
     return (
       <button
         disabled
-        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-700/40 text-slate-500 text-sm font-medium cursor-not-allowed"
+        className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-slate-800/60 text-slate-500 text-sm font-medium cursor-not-allowed border border-slate-700/40"
       >
         <Lock size={14} />
         Select user to reserve
@@ -59,69 +78,60 @@ export const ReservePurchaseButton = ({
     );
   }
 
+  // ── Checking reservation state ────────────────────────────────────────────
   if (checking) {
     return (
-      <div className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-800 text-slate-500 text-sm">
+      <div className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-800/60 text-slate-500 text-sm">
         <Loader2 size={14} className="animate-spin" />
-        Checking reservation…
+        <span>Checking reservation…</span>
       </div>
     );
   }
 
-  const hasActive =
+  const hasActiveReservation =
     activeReservation?.status === "ACTIVE" && !localExpired;
 
-  // ─── RESERVE ──────────────────────────────────────────────────────────────
+  // ── RESERVE ───────────────────────────────────────────────────────────────
   const handleReserve = async () => {
     if (!currentUser) return;
     try {
       await createReservation({ userId: currentUser.id, dropId }).unwrap();
-      toast.success("✅ Reserved!", {
-        description: "You have 60 seconds to complete your purchase.",
+      toast.success("✅ Item Reserved!", {
+        description:
+          "You have 60 seconds to complete your purchase before it expires.",
       });
     } catch (err: unknown) {
-      const msg =
-        err &&
-        typeof err === "object" &&
-        "data" in err &&
-        err.data &&
-        typeof err.data === "object" &&
-        "error" in err.data
-          ? String((err.data as { error: string }).error)
-          : "Could not reserve item. Try again.";
-      toast.error("⚠️ " + msg, { duration: 5000 });
+      toast.error(
+        "⚠️ " + extractError(err, "Could not reserve item. Try again."),
+        { duration: 5000 }
+      );
     }
   };
 
-  // ─── PURCHASE ─────────────────────────────────────────────────────────────
+  // ── PURCHASE ──────────────────────────────────────────────────────────────
   const handlePurchase = async () => {
     if (!currentUser) return;
     try {
       await completePurchase({ userId: currentUser.id, dropId }).unwrap();
-      toast.success("🎉 Purchase complete!", {
-        description: "Your sneakers are on the way!",
-      });
+      // Toast handled by socket hook for the purchaser
     } catch (err: unknown) {
-      const msg =
-        err &&
-        typeof err === "object" &&
-        "data" in err &&
-        err.data &&
-        typeof err.data === "object" &&
-        "error" in err.data
-          ? String((err.data as { error: string }).error)
-          : "Purchase failed. Try again.";
+      const msg = extractError(
+        err,
+        "Purchase failed. Your reservation may have expired."
+      );
       toast.error("⚠️ " + msg, { duration: 5000 });
     }
   };
 
-  if (hasActive && activeReservation) {
+  // ── Active reservation: show countdown + purchase button ──────────────────
+  if (hasActiveReservation && activeReservation) {
     return (
       <div className="flex flex-col gap-2">
         <CountdownTimer
           expiresAt={activeReservation.expiresAt}
           onExpire={() => {
             setLocalExpired(true);
+            // Re-check server state after local expiry
             void refetchReservation();
           }}
         />
@@ -129,23 +139,30 @@ export const ReservePurchaseButton = ({
           onClick={handlePurchase}
           disabled={purchasing}
           className={cn(
-            "w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold transition-all",
-            "bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500",
-            "text-white shadow-lg shadow-violet-900/30 hover:shadow-violet-800/40",
+            "w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200",
+            "bg-gradient-to-r from-violet-600 to-fuchsia-600",
+            "hover:from-violet-500 hover:to-fuchsia-500",
+            "text-white shadow-lg shadow-violet-900/30",
             "disabled:opacity-60 disabled:cursor-not-allowed"
           )}
         >
           {purchasing ? (
-            <Loader2 size={16} className="animate-spin" />
+            <>
+              <Loader2 size={16} className="animate-spin" />
+              Processing…
+            </>
           ) : (
-            <ShoppingCart size={16} />
+            <>
+              <ShoppingCart size={16} />
+              Complete Purchase
+            </>
           )}
-          {purchasing ? "Processing…" : "Complete Purchase"}
         </button>
       </div>
     );
   }
 
+  // ── Default: Reserve button (or Sold Out state) ───────────────────────────
   const outOfStock = availableStock <= 0;
 
   return (
@@ -153,22 +170,31 @@ export const ReservePurchaseButton = ({
       onClick={handleReserve}
       disabled={reserving || outOfStock}
       className={cn(
-        "w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold transition-all",
+        "w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200",
         outOfStock
-          ? "bg-slate-700/40 text-slate-500 cursor-not-allowed"
-          : "bg-slate-700 hover:bg-slate-600 text-white cursor-pointer hover:ring-2 hover:ring-violet-500/40",
+          ? "bg-red-950/50 text-red-400/60 cursor-not-allowed border border-red-900/30"
+          : [
+              "bg-slate-700 hover:bg-slate-600 text-white",
+              "hover:ring-2 hover:ring-violet-500/50",
+              "active:scale-[0.98]",
+            ],
         "disabled:opacity-60 disabled:cursor-not-allowed"
       )}
     >
       {reserving ? (
-        <Loader2 size={16} className="animate-spin" />
+        <>
+          <Loader2 size={16} className="animate-spin" />
+          Reserving…
+        </>
       ) : (
-        <BookmarkPlus size={16} />
+        <>
+          <BookmarkPlus size={16} />
+          {outOfStock ? "Sold Out" : "Reserve"}
+        </>
       )}
-      {reserving ? "Reserving…" : outOfStock ? "Sold Out" : "Reserve"}
     </button>
   );
 };
 
-// Compatibility alias
+// Alias
 export const ReserveButton = ReservePurchaseButton;

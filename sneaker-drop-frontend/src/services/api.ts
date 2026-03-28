@@ -10,8 +10,12 @@ export interface User {
   createdAt: string;
 }
 
+// Matches backend: { purchaseId, userId, username, purchasedAt }
 export interface Purchaser {
+  purchaseId?: string;
+  userId?: string;
   username: string;
+  purchasedAt?: string;
 }
 
 export interface Drop {
@@ -52,36 +56,41 @@ export const api = createApi({
   baseQuery: fetchBaseQuery({ baseUrl: `${BASE_URL}/api` }),
   tagTypes: ["Drops", "Reservation"],
   endpoints: (builder) => ({
-    // Drops
+    // ── Drops ─────────────────────────────────────────────────────────────────
     getDrops: builder.query<Drop[], void>({
       query: () => "/drops",
       transformResponse: (res: { success: boolean; data: Drop[] }) => res.data,
       providesTags: ["Drops"],
+      // Polls every 30s as WebSocket fallback
+      keepUnusedDataFor: 60,
     }),
 
-    // Users
+    // ── Users ─────────────────────────────────────────────────────────────────
     getUsers: builder.query<User[], void>({
       query: () => "/users",
       transformResponse: (res: { success: boolean; data: User[] }) => res.data,
     }),
 
-    // Check reservation
+    // ── Check active reservation ───────────────────────────────────────────────
     checkReservation: builder.query<
       Reservation | null,
       { userId: string; dropId: string }
     >({
       query: ({ userId, dropId }) =>
         `/reservations/check?userId=${userId}&dropId=${dropId}`,
+      // data can be null (no active reservation) — handle safely
       transformResponse: (res: {
         success: boolean;
         data: Reservation | null;
-      }) => res.data,
+      }) => res.data ?? null,
       providesTags: (_result, _err, arg) => [
         { type: "Reservation", id: `${arg.userId}-${arg.dropId}` },
       ],
+      // Always re-check on mount — reservation state changes externally (expiry worker)
+      keepUnusedDataFor: 0,
     }),
 
-    // Create reservation
+    // ── Create reservation ─────────────────────────────────────────────────────
     createReservation: builder.mutation<
       Reservation,
       { userId: string; dropId: string }
@@ -93,12 +102,13 @@ export const api = createApi({
       }),
       transformResponse: (res: { success: boolean; data: Reservation }) =>
         res.data,
+      // Invalidate both: reservation state + drop list (for activity feed consistency)
       invalidatesTags: (_result, _err, arg) => [
         { type: "Reservation", id: `${arg.userId}-${arg.dropId}` },
       ],
     }),
 
-    // Complete purchase
+    // ── Complete purchase ──────────────────────────────────────────────────────
     completePurchase: builder.mutation<
       Purchase,
       { userId: string; dropId: string }
@@ -110,6 +120,7 @@ export const api = createApi({
       }),
       transformResponse: (res: { success: boolean; data: Purchase }) =>
         res.data,
+      // Invalidate drops (activity feed refresh) + reservation (button reset)
       invalidatesTags: (_result, _err, arg) => [
         "Drops",
         { type: "Reservation", id: `${arg.userId}-${arg.dropId}` },
