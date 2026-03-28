@@ -115,7 +115,9 @@ export const ReservePurchaseButton = ({
     if (!currentUser) return;
     try {
       await completePurchase({ userId: currentUser.id, dropId }).unwrap();
-      // Toast handled by socket hook for the purchaser
+      // Hide the countdown timer + purchase button immediately after success
+      // (don't wait for cache invalidation or socket event to propagate)
+      setLocalExpired(true);
     } catch (err: unknown) {
       const msg = extractError(
         err,
